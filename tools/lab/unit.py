@@ -10,6 +10,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 # remote bits
 LEFT, RIGHT, DOWN, UP, PLUS, TWO, ONE, B, A, MINUS, Z, C, HOME = 1, 2, 4, 8, 0x10, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000
 DEAD, KMUL = 10, 205
+SPEED, XLIM, YLIM = 0.02, 1.0, 0.75
 
 
 def axis(v):
@@ -27,6 +28,16 @@ def model_gc(w, sx, sy):
                      (0x8, UP), (0x4, DOWN), (0x1, LEFT), (0x2, RIGHT)):
         if w & src: m |= dst
     return m, axis(sx - 128), axis(sy - 128)
+
+
+def f32(x):
+    return struct.unpack('>f', struct.pack('>f', x))[0]
+
+
+def ptr_step(pos, rx, ry, home=False):
+    x, y = (0.0, 0.0) if home else pos
+    x = f32(x + f32(rx * SPEED)); y = f32(y - f32(ry * SPEED))
+    return (max(-XLIM, min(XLIM, x)), max(-YLIM, min(YLIM, y)))
 
 
 def model_cc(h):
@@ -56,7 +67,7 @@ class Harness:
 
     BUF = 0x80710000
 
-    def run(self, chan, samples, si=None, prev=0):
+    def run(self, chan, samples, si=None, prev=0, sil=0x80808000, pos=(0.0, 0.0)):
         """samples: list of 0x84-byte KPADStatus, newest first (buf[0]).  si: INBUFH of the port or None.
         Returns (new samples, new prev hold)."""
         mu = Uc(UC_ARCH_PPC, UC_MODE_PPC32 | UC_MODE_BIG_ENDIAN)
@@ -72,17 +83,19 @@ class Harness:
         n = len(samples)
         for i, smp in enumerate(samples):
             mu.mem_write(self.BUF + i * 0x84, smp)
-        mu.mem_write(self.blob['addr'] + chan * 8, struct.pack('>I', prev))
+        mu.mem_write(self.blob['addr'] + chan * 16, struct.pack('>Iff', prev, *pos))
         for ch in range(4):
             v = (si if (si is not None and ch == chan) else 0x80000000)
-            mu.mem_write(0xCD006404 + 12 * ch, struct.pack('>I', v))
+            mu.mem_write(0xCD006404 + 12 * ch, struct.pack('>II', v, sil if (si is not None and ch == chan) else 0x80808000))
         mu.reg_write(UC_PPC_REG_31, r31)
         mu.reg_write(UC_PPC_REG_30, n)
         mu.reg_write(UC_PPC_REG_14, self.BUF - 0x84)  # KPADRead leaves r14 one slot below the buffer
         mu.reg_write(UC_PPC_REG_1, 0x80700000)
-        mu.emu_start(base, end, count=20000)
+        mu.emu_start(base, end, count=40000)
         out = [bytes(mu.mem_read(self.BUF + i * 0x84, 0x84)) for i in range(n)]
-        newprev = struct.unpack('>I', mu.mem_read(self.blob['addr'] + chan * 8, 4))[0]
+        st = struct.unpack('>Iff', mu.mem_read(self.blob['addr'] + chan * 16, 12))
+        newprev = st[0]
+        self.pos = st[1:]
         assert mu.reg_read(UC_PPC_REG_0) == 0, 'displaced li r0,0 did not run'
         assert mu.reg_read(UC_PPC_REG_1) == 0x80700000, 'stack not restored'
         return out, newprev
@@ -163,6 +176,38 @@ def check(region):
     # --- zero samples: nothing happens (and nothing breaks)
     outs, prev = h.run(0, [], prev=0x1234)
     expect('empty read', outs == [] and prev == 0x1234)
+    # --- pointer: GameCube C-stick, Classic right stick, accumulation, clamp, HOME recentre
+    def ptr(b):
+        f = struct.unpack('>ff', b[0x20:0x28])
+        return f, b[0x5e], struct.unpack('>ff', b[0x34:0x3c]), struct.unpack('>f', b[0x48:0x4c])[0]
+    for cx, cy in ((128, 128), (255, 128), (0, 128), (128, 255), (128, 0), (220, 40)):
+        sil = (cx << 24) | (cy << 16) | 0x8080
+        (out,), prev = h.run(1, [status(dev=0)], si=0x00800000, sil=sil, pos=(0.1, -0.2))
+        want = ptr_step((0.1, -0.2), axis(cx - 128), axis(cy - 128))
+        f, dpd, hz, dist = ptr(out)
+        expect('gc pointer c=(%d,%d)' % (cx, cy), dpd == 1 and abs(f[0] - want[0]) < 1e-6 and abs(f[1] - want[1]) < 1e-6
+               and hz == (1.0, 0.0) and dist == 1.0 and abs(h.pos[0] - want[0]) < 1e-6 and abs(h.pos[1] - want[1]) < 1e-6,
+               '%s want %s state %s' % (f, want, h.pos))
+    for rx, ry in ((0.0, 0.0), (1.0, 0.0), (-1.0, 0.5), (0.0, -1.0)):
+        (out,), prev = h.run(2, [status(dev=2, rx=rx, ry=ry)], pos=(0.3, 0.3))
+        want = ptr_step((0.3, 0.3), rx, ry)
+        f, dpd, hz, dist = ptr(out)
+        expect('cc pointer r=(%g,%g)' % (rx, ry), dpd == 1 and abs(f[0] - want[0]) < 1e-6 and abs(f[1] - want[1]) < 1e-6,
+               '%s want %s' % (f, want))
+    (out,), prev = h.run(0, [status(dev=2, rx=1.0, ry=-1.0)], pos=(0.99, 0.74))
+    f, dpd, hz, dist = ptr(out)
+    expect('pointer clamps', f == (1.0, 0.75), str(f))
+    (out,), prev = h.run(0, [status(dev=2, cl_hold=0x0800, rx=0.0, ry=0.0)], pos=(0.5, -0.5))
+    f, dpd, hz, dist = ptr(out)
+    expect('HOME recentres', f == (0.0, 0.0) and rd(out)[0] == HOME, '%s %08X' % (f, rd(out)[0]))
+    outs, prev = h.run(0, [status(dev=2, rx=1.0), status(dev=2, rx=1.0), status(dev=2, rx=1.0)], pos=(0.0, 0.0))
+    want = (0.0, 0.0)
+    for _ in range(3): want = ptr_step(want, 1.0, 0.0)
+    expect('pointer accumulates per sample', [ptr(o)[0] for o in outs][0] == want and abs(h.pos[0] - want[0]) < 1e-6, str(h.pos))
+    # a sample the patch leaves alone keeps its own (hardware) pointer fields
+    st = status(hold=3, dev=1)
+    (out,), _ = h.run(0, [st])
+    expect('untouched sample keeps pointer fields', out == st)
     print('%s: %s' % (region, 'ok' if not fails else '%d FAILED' % fails))
     return fails
 

@@ -11,8 +11,8 @@ CAVE_BASE = 0x80001820
 CAVE_LIMIT = 0x80003000
 
 PAD_BASE = 0x80001820         # the controller routine
-PAD_END = 0x80001B20
-DATA_BASE = 0x80001B20        # per-channel state: 4 x 8 bytes (+ debug words)
-DATA_END = 0x80001B40
+PAD_END = 0x80001D00
+DATA_BASE = 0x80001D00        # per-channel state: 4 x 16 bytes: previous hold, pointer x, y
+DATA_END = 0x80001D40
 
 WINDOWS = {'pad': (PAD_BASE, DATA_END)}

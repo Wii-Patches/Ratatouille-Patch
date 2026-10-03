@@ -8,12 +8,14 @@
 #   * a GameCube pad on the same port number as the channel, or
 #   * a Classic Controller plugged into the Wii Remote
 #
-# is rewritten into exactly that.  Only the caller's copies are touched, never KPAD's own
+# is rewritten into exactly that, with the right stick steering a pointer (HOME recentres it)
+# for the menus and the HOME Menu.  Only the caller's copies are touched, never KPAD's own
 # channel struct, so KPAD keeps seeing what the hardware sent.
 #
 # The SI hardware polls the pads and mirrors the answer into SIC<n>INBUFH
-# (0xCD006404 + 12*n): [31] error, [23] always 1 in a real pad answer,
-# [29:16] the PAD button word, [15:8] stick X, [7:0] stick Y (128 = centre).
+# (0xCD006404 + 12*n, then INBUFL at +4): INBUFH [31] error, [23] always 1 in a real pad
+# answer, [29:16] the PAD button word, [15:8] stick X, [7:0] stick Y (128 = centre);
+# INBUFL [31:24] C-stick X, [23:16] C-stick Y.
 #
 # On entry (inside KPADRead): r30 = number of samples, r14 + 0x84 = the buffer (buf[0] is
 # the newest sample, buf[n-1] the oldest), r31 = this channel's KPAD struct.  Free:
@@ -27,7 +29,7 @@
 1:
 .endm
 
-    stwu    1, -0x40(1)
+    stwu    1, -0x60(1)
     cmplwi  30, 0
     beq     done                        # nothing was read
     lis     4, KBASE@ha
@@ -37,10 +39,10 @@
     divwu   4, 4, 5                     # r4 = channel 0..3
     cmplwi  4, 3
     bgt     done
-    slwi    7, 4, 3
+    slwi    7, 4, 4
     lis     6, DATA@ha
     addi    6, 6, DATA@l
-    add     7, 7, 6                     # r7 = this channel's state: previous merged hold
+    add     7, 7, 6                     # r7 = this channel's state: previous merged hold, pointer x, y
 
     mulli   5, 4, 12
     lis     6, 0xCD00
@@ -52,7 +54,7 @@
     andis.  9, 8, 0x0080
     beq     nopad                       # not a pad answer
 
-    # ---- GameCube pad -> remote bits (r12), stick (stack: x at 0x34, y at 0x30)
+    # ---- GameCube pad -> remote bits (r12), sticks on the stack (main x 0x44, y 0x40; C x 0x4c, y 0x48)
     srwi    9, 8, 16                    # PAD buttons
     li      10, 0
     MAP     0x0100, 0x0800              # A       -> A
@@ -71,13 +73,35 @@
     rlwinm  4, 8, 24, 24, 31            # stick X (u8)
     addi    4, 4, -128
     bl      axis
-    stfs    0, 0x34(1)
+    stfs    0, 0x44(1)                  # main stick x
     rlwinm  4, 8, 0, 24, 31             # stick Y (u8)
     addi    4, 4, -128
     bl      axis
-    stfs    0, 0x30(1)
+    stfs    0, 0x40(1)                  # main stick y
+    lwz     8, 0x6408(6)                # INBUFL: C-stick
+    rlwinm  4, 8, 8, 24, 31             # C-stick X
+    addi    4, 4, -128
+    bl      axis
+    stfs    0, 0x4c(1)
+    rlwinm  4, 8, 16, 24, 31            # C-stick Y
+    addi    4, 4, -128
+    bl      axis
+    stfs    0, 0x48(1)
 
 nopad:
+    # pointer state and constants: f10/f11 = pos x/y, f12 = speed per sample, f13 = x limit, f14 = y limit
+    lfs     10, 4(7)
+    lfs     11, 8(7)
+    lis     0, 0x3CA3                   # 0.02
+    ori     0, 0, 0xD70A
+    stw     0, 0x50(1)
+    lfs     12, 0x50(1)
+    lis     0, 0x3F80                   # 1.0
+    stw     0, 0x50(1)
+    lfs     13, 0x50(1)
+    lis     0, 0x3F40                   # 0.75
+    stw     0, 0x50(1)
+    lfs     14, 0x50(1)
     # ---- walk the samples oldest -> newest (buf[n-1] .. buf[0])
     mulli   3, 30, 0x84
     add     3, 3, 14
@@ -113,11 +137,15 @@ next:
     MAP     0x8000, 0x0002              # Right   -> Right
     lfs     0, 0x6c(3)                  # left stick x
     lfs     1, 0x70(3)                  # left stick y
+    lfs     5, 0x74(3)                  # right stick x
+    lfs     6, 0x78(3)                  # right stick y
     b       build
 usepad:
     clrlwi  10, 12, 1                   # the pad's remote bits
-    lfs     0, 0x34(1)
-    lfs     1, 0x30(1)
+    lfs     0, 0x44(1)
+    lfs     1, 0x40(1)
+    lfs     5, 0x4c(1)
+    lfs     6, 0x48(1)
 
 build:
     # the sample becomes a Nunchuk's: stick, resting accelerometer, no shoulders
@@ -136,6 +164,40 @@ build:
     stw     5, 0x7c(3)
     stw     5, 0x80(3)
 
+    # the pointer: HOME recentres it, the right stick steers it (y grows downwards)
+    andi.   0, 10, 0x8000
+    beq     1f
+    fsub    10, 10, 10
+    fsub    11, 11, 11
+1:  fmadds  10, 5, 12, 10               # x += rx * speed
+    fnmsubs 11, 6, 12, 11               # y -= ry * speed
+    fcmpu   0, 10, 13
+    ble     2f
+    fmr     10, 13
+2:  fneg    7, 13
+    fcmpu   0, 10, 7
+    bge     3f
+    fmr     10, 7
+3:  fcmpu   0, 11, 14
+    ble     4f
+    fmr     11, 14
+4:  fneg    7, 14
+    fcmpu   0, 11, 7
+    bge     5f
+    fmr     11, 7
+5:  stfs    10, 0x20(3)                 # pos
+    stfs    11, 0x24(3)
+    li      5, 1
+    stb     5, 0x5e(3)                  # dpd_valid
+    lis     0, 0x3F80
+    stw     0, 0x34(3)                  # horizon (1, 0)
+    li      5, 0
+    stw     5, 0x38(3)
+    stw     0, 0x48(3)                  # dist 1.0
+    stw     5, 0x28(3)                  # pointer velocity
+    stw     5, 0x2c(3)
+    stw     5, 0x30(3)
+
     # hold / trig / release: the remote's own buttons plus the pad's
     lwz     5, 0(3)
     or      5, 5, 10                    # new hold
@@ -148,6 +210,8 @@ build:
 skip:
     bdnz    next
     stw     4, 0(7)
+    stfs    10, 4(7)
+    stfs    11, 8(7)
     b       done
 
 # r4 = signed stick offset -> f0 = normalised value in [-1, 1] with a dead zone.
@@ -188,5 +252,5 @@ tofloat:                                # f0 = r4 / 256.0
     blr
 
 done:
-    addi    1, 1, 0x40
+    addi    1, 1, 0x60
     li      0, 0                        # displaced instruction
