@@ -99,7 +99,7 @@ jobs:
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt "pyinst_dist/Ratatouille-Patcher.app/Contents/Resources/wit-gpl-2.0.txt"
           cd pyinst_dist
-          zip -qr "../Ratatouille-Patch-${{ matrix.target }}.zip" Ratatouille-Patcher.app
+          zip -qr "../Ratatouille-ISO-Patcher-${{ matrix.target }}.zip" Ratatouille-Patcher.app
 
       - name: Build app (Linux)
         if: matrix.target == 'linux-x86_64'
@@ -112,7 +112,7 @@ jobs:
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt pyinst_dist/Ratatouille-Patcher/
           cd pyinst_dist
-          tar -czf "../Ratatouille-Patch-${{ matrix.target }}.tar.gz" Ratatouille-Patcher
+          tar -czf "../Ratatouille-ISO-Patcher-${{ matrix.target }}.tar.gz" Ratatouille-Patcher
 
       - name: Build app (Windows)
         if: matrix.target == 'windows-x86_64'
@@ -127,16 +127,16 @@ jobs:
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt pyinst_dist/Ratatouille-Patcher/
           cd pyinst_dist
-          7z a "../Ratatouille-Patch-${{ matrix.target }}.zip" Ratatouille-Patcher \
-            || powershell -Command "Compress-Archive -Path Ratatouille-Patcher -DestinationPath ../Ratatouille-Patch-${{ matrix.target }}.zip"
+          7z a "../Ratatouille-ISO-Patcher-${{ matrix.target }}.zip" Ratatouille-Patcher \
+            || powershell -Command "Compress-Archive -Path Ratatouille-Patcher -DestinationPath ../Ratatouille-ISO-Patcher-${{ matrix.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Ratatouille-Patch-${{ matrix.target }}
-          path: Ratatouille-Patch-${{ matrix.target }}.*
+          name: Ratatouille-ISO-Patcher-${{ matrix.target }}
+          path: Ratatouille-ISO-Patcher-${{ matrix.target }}.*
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: Ratatouille-Patch-${{ matrix.target }}.*
+          files: Ratatouille-ISO-Patcher-${{ matrix.target }}.*
